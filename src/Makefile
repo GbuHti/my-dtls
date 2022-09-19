@@ -1,7 +1,9 @@
 
 CFLAGS      = -std=c99 -pedantic -Wall -g -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-overlength-strings
 INCLUDES    = -I/usr/local/include
+INCLUDES	+= -I/usr/local/Cellar/openssl@1.1/1.1.1p/include
 LFLAGS      = -L/usr/local/lib
+LFLAGS      += -L/usr/local/Cellar/openssl@1.1/1.1.1p/lib
 LIBS        = -lssl -lcrypto -pthread -lm -ldl
 
 #CFLAGS     += -fsanitize=address -fno-omit-frame-pointer -g

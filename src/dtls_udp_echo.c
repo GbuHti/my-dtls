@@ -42,6 +42,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +54,10 @@
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/opensslv.h>
-
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+#include <fcntl.h>
 
 #define BUFFER_SIZE          (1<<16)
 #define COOKIE_SECRET_LENGTH 16
@@ -349,6 +353,71 @@ int verify_cookie(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len
 	return 0;
 	}
 
+void apps_ssl_info_callback(SSL *s, int where, int ret)
+{
+	const char *str;
+	int w;
+
+	w=where& ~SSL_ST_MASK;
+
+	if (w & SSL_ST_CONNECT) str="SSL_connect";
+	else if (w & SSL_ST_ACCEPT) str="SSL_accept";
+	else str="undefined";
+
+	if (where & SSL_CB_LOOP)
+	{
+		printf("%s:%s\n",str,SSL_state_string_long(s));
+	}
+	else if (where & SSL_CB_ALERT)
+	{
+		str=(where & SSL_CB_READ)?"read":"write";
+		printf("SSL3 alert %s:%s:%s\n",
+				str,
+				SSL_alert_type_string_long(ret),
+				SSL_alert_desc_string_long(ret));
+	}
+	else if (where & SSL_CB_EXIT)
+	{
+		if (ret == 0)
+			printf("%s:failed in %s\n",
+					str,SSL_state_string_long(s));
+		else if (ret < 0)
+		{
+			printf("%s:error in %s\n",
+					str,SSL_state_string_long(s));
+		}
+	}
+}
+
+long bio_dump_callback(BIO *bio, int cmd, const char *argp,
+		int argi, long argl, long ret)
+{
+
+	if (cmd == (BIO_CB_READ | BIO_CB_RETURN)) {
+		printf("=============================================== read from %p [%p] (%lu bytes => %ld (0x%lX))\n",
+				(void *)bio, (void *)argp, (unsigned long)argi, ret, ret);
+		return (ret);
+	} else if (cmd == (BIO_CB_WRITE | BIO_CB_RETURN)) {
+		printf("=============================================== write to %p [%p] (%lu bytes => %ld (0x%lX))\n",
+				(void *)bio, (void *)argp, (unsigned long)argi, ret, ret);
+	}
+	return (ret);
+}
+
+long bio_dump_callback_ex(BIO *bio, int cmd, const char *argp,
+		int argi, long argl, long argk, int ret, size_t *processed)
+{
+
+	if (cmd == (BIO_CB_READ | BIO_CB_RETURN)) {
+		printf("=============================================== read from %p [%p] (%lu bytes => %ld (0x%lX))\n",
+				(void *)bio, (void *)argp, (unsigned long)argi, *processed, *processed);
+		return (ret);
+	} else if (cmd == (BIO_CB_WRITE | BIO_CB_RETURN)) {
+		printf("=============================================== write to %p [%p] (%lu bytes => %ld (0x%lX))\n",
+				(void *)bio, (void *)argp, (unsigned long)argi, *processed, *processed);
+	}
+	return (ret);
+}
 struct pass_info {
 	union {
 		struct sockaddr_storage ss;
@@ -369,8 +438,11 @@ int dtls_verify_callback (int ok, X509_STORE_CTX *ctx) {
 #ifdef WIN32
 DWORD WINAPI connection_handle(LPVOID *info) {
 #else
-void* connection_handle(void *info) {
+
+void* connection_handle(void *info) 
+{
 #endif
+    printf("xxxxxxxxxxxxxxxxx create new thread\n");
 	ssize_t len;
 	char buf[BUFFER_SIZE];
 	char addrbuf[INET6_ADDRSTRLEN];
@@ -563,7 +635,8 @@ cleanup:
 }
 
 
-void start_server(int port, char *local_address) {
+void start_server(int port, char *local_address) 
+{
 	int fd;
 	union {
 		struct sockaddr_storage ss;
@@ -707,7 +780,8 @@ void start_server(int port, char *local_address) {
 #endif
 }
 
-void start_client(char *remote_address, char *local_address, int port, int length, int messagenumber) {
+void start_client(char *remote_address, char *local_address, int port, int length, int messagenumber) 
+{
 	int fd, retval;
 	union {
 		struct sockaddr_storage ss;
@@ -754,6 +828,10 @@ void start_client(char *remote_address, char *local_address, int port, int lengt
 		perror("socket");
 		exit(-1);
 	}
+
+    //int oldSocketFlag = fcntl(fd, F_GETFL, 0);
+    //int newSocketFlag = oldSocketFlag | O_NONBLOCK;
+    //fcntl(fd, F_SETFL,  newSocketFlag);
 
 	if (strlen(local_address) > 0) {
 		if (inet_pton(AF_INET, local_address, &local_addr.s4.sin_addr) == 1) {
@@ -817,41 +895,45 @@ void start_client(char *remote_address, char *local_address, int port, int lengt
 	}
 	BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &remote_addr.ss);
 
+	SSL_set_info_callback(ssl, apps_ssl_info_callback);
+	//BIO_set_callback(bio, bio_dump_callback);
+	BIO_set_callback_ex(bio, bio_dump_callback_ex);
+
 	SSL_set_bio(ssl, bio, bio);
 
-	retval = SSL_connect(ssl);
-	if (retval <= 0) {
-		switch (SSL_get_error(ssl, retval)) {
-			case SSL_ERROR_ZERO_RETURN:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_ZERO_RETURN\n");
-				break;
-			case SSL_ERROR_WANT_READ:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_READ\n");
-				break;
-			case SSL_ERROR_WANT_WRITE:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_WRITE\n");
-				break;
-			case SSL_ERROR_WANT_CONNECT:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_CONNECT\n");
-				break;
-			case SSL_ERROR_WANT_ACCEPT:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n");
-				break;
-			case SSL_ERROR_WANT_X509_LOOKUP:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n");
-				break;
-			case SSL_ERROR_SYSCALL:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_SYSCALL\n");
-				break;
-			case SSL_ERROR_SSL:
-				fprintf(stderr, "SSL_connect failed with SSL_ERROR_SSL\n");
-				break;
-			default:
-				fprintf(stderr, "SSL_connect failed with unknown error\n");
-				break;
-		}
-		exit(EXIT_FAILURE);
-	}
+    retval = SSL_connect(ssl);
+    if (retval <= 0) {
+        switch (SSL_get_error(ssl, retval)) {
+            case SSL_ERROR_ZERO_RETURN:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_ZERO_RETURN\n");
+                break;
+            case SSL_ERROR_WANT_READ:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_READ\n");
+                break;
+            case SSL_ERROR_WANT_WRITE:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_WRITE\n");
+                break;
+            case SSL_ERROR_WANT_CONNECT:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_CONNECT\n");
+                break;
+            case SSL_ERROR_WANT_ACCEPT:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_ACCEPT\n");
+                break;
+            case SSL_ERROR_WANT_X509_LOOKUP:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_WANT_X509_LOOKUP\n");
+                break;
+            case SSL_ERROR_SYSCALL:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_SYSCALL descirption:%s\n", strerror(errno));
+                break;
+            case SSL_ERROR_SSL:
+                fprintf(stderr, "SSL_connect failed with SSL_ERROR_SSL\n");
+                break;
+            default:
+                fprintf(stderr, "SSL_connect failed with unknown error\n");
+                break;
+        }
+        exit(EXIT_FAILURE);
+    }
 
 	/* Set and activate timeouts */
 	timeout.tv_sec = 3;
@@ -921,9 +1003,15 @@ void start_client(char *remote_address, char *local_address, int port, int lengt
 				SSL_shutdown(ssl);
 		}
 
+        time_t t;
 		reading = 1;
 		while (reading) {
+            time(&t);
+            printf("read start at %ld\n", t);
 			len = SSL_read(ssl, buf, sizeof(buf));
+            time(&t);
+            printf("read end at %ld\n", t);
+
 
 			switch (SSL_get_error(ssl, len)) {
 				case SSL_ERROR_NONE:
